@@ -23,11 +23,11 @@ jobs:
           
       - name: Restore dependencies
         run: dotnet restore
-      - run: MEP-APIs/MEP-APIs.csproj
-      - run: Application/Application.csproj
-      - run: Domain/Domain.csproj Domain/
-      - run: Infrastructure/Infrastructure.csproj Infrastructure/
-      - run: dotnet restore /MEP-APIs/MEP-APIs/MEP-APIs.csproj
+      - run: src/MEP-APIs/MEP-APIs.csproj
+      - run: src/Application/Application.csproj
+      - run: src/Domain/Domain.csproj Domain/
+      - run: src/Infrastructure/Infrastructure.csproj Infrastructure/
+      - run: dotnet restore src/MEP-APIs/MEP-APIs/MEP-APIs.csproj
 
       - name: Build Project
         run: dotnet build --configuration Release --no-restore
