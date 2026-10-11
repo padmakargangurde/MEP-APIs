@@ -20,9 +20,14 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
+          
       - name: Restore dependencies
-        run: dotnet restore /MEP-APIs/MEP-APIs/MEP-APIs.csproj
+        run: dotnet restore
+      - run: MEP-APIs/MEP-APIs.csproj
+      - run: Application/Application.csproj
+      - run: Domain/Domain.csproj Domain/
+      - run: Infrastructure/Infrastructure.csproj Infrastructure/
+      - run: dotnet restore /MEP-APIs/MEP-APIs/MEP-APIs.csproj
 
       - name: Build Project
         run: dotnet build --configuration Release --no-restore
