@@ -34,10 +34,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore dependencies
-        run: dotnet restore MEP-APIs.sln
+        run: dotnet restore src/MEP-APIs.sln
 
       - name: Build solution
-        run: dotnet build MEP-APIs.sln -c Release --no-restore
+        run: dotnet build src/MEP-APIs.sln -c Release --no-restore
 
       - name: Run automated tests
         shell: bash
