@@ -1,4 +1,5 @@
-name: Build and Deploy .NET 8 API
+
+name: Deploy .NET 8 REST API to AWS EC2
 
 on:
   push:
@@ -8,51 +9,38 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
-concurrency:
-  group: mep-apis-deployment
-  cancel-in-progress: false
+env:
+  CONTAINER_NAME: MEP-APIs
+  REGISTRY: ghcr.io
 
 jobs:
   build-and-deploy:
-    name: Build, Push, and Deploy
+    name: Build and Deploy API
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout source code
+      # 1. Download the source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Verify repository structure
-      - name: Verify Dockerfile and solution
+      # 2. Create a lowercase image name
+      - name: Set Docker image name
+        id: image
+        shell: bash
         run: |
-          echo "Repository root:"
-          pwd
-          ls -la
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-          test -f Dockerfile || {
-            echo "ERROR: Dockerfile not found in repository root"
-            find . -type f -iname 'Dockerfile'
-            exit 1
-          }
-
-          test -f MEP-APIs.sln || {
-            echo "ERROR: MEP-APIs.sln not found in repository root"
-            exit 1
-          }
-
-      # 3. Set up Docker Buildx
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # 4. Login to Docker Hub
-      - name: Login to Docker Hub
+      # 3. Authenticate with GitHub Container Registry
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 5. Build and push image
+      # 4. Build and publish the Docker image
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -60,62 +48,45 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/mep-apis:latest
-            ${{ secrets.DOCKER_USERNAME }}/mep-apis:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
 
-      # 6. Deploy to EC2 via SSH
+      # 5. Connect to EC2 and deploy the image
       - name: Deploy to AWS EC2
-        uses: appleboy/ssh-action@v1.2.2
+        uses: appleboy/ssh-action@v1.2.0
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_TOKEN: ${{ secrets.DOCKER_PASSWORD }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          EC2_APP_PORT: ${{ secrets.EC2_APP_PORT }}
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          port: 22
-          envs: DOCKER_USERNAME,DOCKER_PASSWORD,IMAGE_TAG
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_NAME,GHCR_USERNAME,GHCR_TOKEN,EC2_APP_PORT
           script: |
             set -eu
 
-            IMAGE="$DOCKER_USERNAME/mep-apis:$IMAGE_TAG"
-            CONTAINER_NAME="mep-apis"
+            # Log in to the container registry
+            echo "$GHCR_TOKEN" | docker login ghcr.io \
+              -u "$GHCR_USERNAME" --password-stdin
 
-            echo "Logging in to Docker Hub..."
-            echo "$DOCKER_TOKEN" | docker login \
-              --username "$DOCKERHUB_USERNAME" \
-              --password-stdin
+            # Download the latest image
+            docker pull "$IMAGE_NAME:latest"
 
-            echo "Pulling image: $IMAGE"
-            docker pull "$IMAGE"
+            # Replace the old API container
+            docker rm -f rmeprestapi 2>/dev/null || true
 
-            docker logout
-
-            echo "Stopping existing container if present..."
-            if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-              docker stop "$CONTAINER_NAME"
-              docker rm "$CONTAINER_NAME"
-            fi
-
-            echo "Starting updated application..."
+            # Start the new API container
             docker run -d \
-              --name "$CONTAINER_NAME" \
+              --name rmeprestapi \
               --restart unless-stopped \
-              -p 8080:8080 \
-              "$IMAGE"
+              -p "${EC2_APP_PORT}:8080" \
+              "$IMAGE_NAME:latest"
 
-            echo "Checking container status..."
-            sleep 5
-            docker ps --filter "name=^/${CONTAINER_NAME}$"
+            # Display deployment status
+            docker ps --filter "name=rmeprestapi"
+            docker logs --tail 50 rmeprestapi
 
-            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")" != "true" ]; then
-              echo "ERROR: Application container failed to start"
-              docker logs "$CONTAINER_NAME"
-              exit 1
-            fi
-
-            echo "Cleaning up unused images..."
-            docker image prune -f
-
-            echo "Deployment completed successfully."
+            # Log out from the registry
+            docker logout ghcr.io
