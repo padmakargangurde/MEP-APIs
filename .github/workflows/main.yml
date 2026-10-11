@@ -1,215 +1,95 @@
-name: Build, Test and Deploy .NET 8 API
+name: Build and Deploy .NET 8 Web API
 
 on:
   push:
     branches:
       - main
 
-  # Allows a deployment to be started manually.
+  # Allow manual deployment from the GitHub Actions tab
   workflow_dispatch:
-
-# Prevent concurrent deployments from replacing each other.
-concurrency:
-  group: production-deployment
-  cancel-in-progress: false
 
 permissions:
   contents: read
 
-env:
-  DOTNET_VERSION: "8.0.x"
-  CONTAINER_NAME: mep-apis
-  CONTAINER_PORT: "8080"
-  HOST_PORT: "8080"
-  HEALTH_PATH: /health
+concurrency:
+  group: mep-apis-deployment
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: Restore, Build and Test
+  build-and-deploy:
+    name: Build, Push, and Deploy
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      # 1. Download source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Restore dependencies
-        run: dotnet restore MEP-APIs.sln
-
-      - name: Build solution
-        run: >
-          dotnet build MEP-APIs.sln
-          --configuration Release
-          --no-restore
-
-      - name: Run tests
-        run: >
-          dotnet test MEP-APIs.sln
-          --configuration Release
-          --no-build
-          --logger "trx;LogFileName=test-results.trx"
-
-  build-and-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: test
-
-    outputs:
-      image: ${{ steps.image.outputs.image }}
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
+      # 2. Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      # 3. Authenticate with Docker Hub
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Define image name
-        id: image
-        shell: bash
-        run: |
-          echo "image=${DOCKERHUB_USERNAME,,}/mep-apis:${GITHUB_SHA}" \
-            >> "$GITHUB_OUTPUT"
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-
-      - name: Build and push image
+      # 4. Build and push the Docker image
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ steps.image.outputs.image }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mep-apis:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mep-apis:${{ github.sha }}
 
-  deploy:
-    name: Deploy to AWS EC2
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    environment: production
-
-    steps:
-      - name: Set up SSH
+      # 5. Deploy the image to AWS EC2 through SSH
+      - name: Deploy to AWS EC2
+        uses: appleboy/ssh-action@v1.2.2
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.EC2_SSH_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy container
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          IMAGE: ${{ needs.build-and-push.outputs.image }}
-          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
-          HOST_PORT: ${{ env.HOST_PORT }}
-          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
-          HEALTH_PATH: ${{ env.HEALTH_PATH }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          port: 22
+          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,IMAGE_TAG
+          script: |
+            set -eu
 
-          # Pass the Docker Hub token through stdin, not the command line.
-          printf '%s' "$DOCKERHUB_TOKEN" |
-            ssh -i ~/.ssh/deploy_key \
-              -o StrictHostKeyChecking=yes \
-              "$EC2_USER@$EC2_HOST" \
-              "docker login -u '$DOCKERHUB_USERNAME' --password-stdin"
+            IMAGE="$DOCKERHUB_USERNAME/mep-apis:$IMAGE_TAG"
+            CONTAINER_NAME="mep-apis"
 
-          ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=yes \
-            "$EC2_USER@$EC2_HOST" \
-            "IMAGE='$IMAGE' \
-             CONTAINER_NAME='$CONTAINER_NAME' \
-             HOST_PORT='$HOST_PORT' \
-             CONTAINER_PORT='$CONTAINER_PORT' \
-             HEALTH_PATH='$HEALTH_PATH' \
-             bash -s" <<'REMOTE_SCRIPT'
-          set -Eeuo pipefail
+            echo "Logging in to Docker Hub..."
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USERNAME" \
+              --password-stdin
 
-          # Pull the exact image built by this workflow.
-          docker pull "$IMAGE"
+            echo "Pulling image: $IMAGE"
+            docker pull "$IMAGE"
 
-          # Remember the current image for rollback.
-          OLD_IMAGE=""
-          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-            OLD_IMAGE=$(docker container inspect \
-              --format '{{.Config.Image}}' "$CONTAINER_NAME")
-          fi
+            docker logout
 
-          rollback() {
-            echo "Deployment failed; attempting rollback."
-            docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-
-            if [ -n "$OLD_IMAGE" ]; then
-              docker run -d \
-                --restart unless-stopped \
-                --name "$CONTAINER_NAME" \
-                -p "127.0.0.1:${HOST_PORT}:${CONTAINER_PORT}" \
-                "$OLD_IMAGE" || true
-            fi
-          }
-
-          # Replace the current container.
-          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-
-          if ! docker run -d \
-            --restart unless-stopped \
-            --name "$CONTAINER_NAME" \
-            -p "127.0.0.1:${HOST_PORT}:${CONTAINER_PORT}" \
-            "$IMAGE"; then
-            rollback
-            exit 1
-          fi
-
-          # Wait for the application to become healthy.
-          HEALTHY=0
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent \
-              "http://127.0.0.1:${HOST_PORT}${HEALTH_PATH}" \
-              >/dev/null; then
-              HEALTHY=1
-              break
+            echo "Stopping existing container if it exists..."
+            if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+              docker stop "$CONTAINER_NAME"
+              docker rm "$CONTAINER_NAME"
             fi
 
-            # Fail early if the container has exited.
-            if [ "$(docker inspect -f '{{.State.Running}}' \
-              "$CONTAINER_NAME" 2>/dev/null || true)" != "true" ]; then
-              break
-            fi
+            echo "Starting updated container..."
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              "$IMAGE"
 
-            sleep 2
-          done
+            echo "Removing unused Docker images..."
+            docker image prune -f
 
-          if [ "$HEALTHY" -ne 1 ]; then
-            docker logs --tail 100 "$CONTAINER_NAME" || true
-            rollback
-            exit 1
-          fi
-
-          echo "Deployment successful: $IMAGE"
-
-          # Keep a small number of old images for troubleshooting.
-          docker image prune -f
-          REMOTE_SCRIPT
-
-      - name: Clean up SSH key
-        if: always()
-        run: rm -f ~/.ssh/deploy_key
+            echo "Deployment completed."
