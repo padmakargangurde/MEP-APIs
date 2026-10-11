@@ -4,79 +4,204 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mep-api-production
+  cancel-in-progress: false
 
 env:
-  IMAGE_NAME: MEP-APIs
+  CONTAINER_NAME: MEP-APIs
+  CONTAINER_PORT: "8080"
+  HOST_PORT: "8080"
+  DEPLOY_PATH: /opt/MEP-APIs
+  HEALTH_PATH: /health
 
 jobs:
-  build-deploy:
+  build-test-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Source
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up .NET 8
+      - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
-          
+          dotnet-version: 8.0.x
+
       - name: Restore dependencies
-        run: dotnet restore
-      - run: src/MEP-APIs/MEP-APIs.csproj
-      - run: src/Application/Application.csproj
-      - run: src/Domain/Domain.csproj Domain/
-      - run: src/Infrastructure/Infrastructure.csproj Infrastructure/
-      - run: dotnet restore src/MEP-APIs/MEP-APIs/MEP-APIs.csproj
+        run: dotnet restore MEP-APIs.sln
 
-      - name: Build Project
-        run: dotnet build --configuration Release --no-restore
+      - name: Build solution
+        run: dotnet build MEP-APIs.sln -c Release --no-restore
 
-      - name: Run Tests
-        run: dotnet test --configuration Release --no-build
+      - name: Run automated tests
+        shell: bash
+        run: |
+          mapfile -t projects < <(
+            find . -type f \
+              \( -name '*Tests.csproj' -o -name '*Test.csproj' \) \
+              -not -path '*/bin/*' \
+              -not -path '*/obj/*'
+          )
 
-      - name: Login Docker Hub
+          if [ "${#projects[@]}" -eq 0 ]; then
+            echo "::error::No test projects found."
+            exit 1
+          fi
+
+          for project in "${projects[@]}"; do
+            dotnet test "$project" \
+              -c Release \
+              --no-restore
+          done
+
+      - name: Set Docker Hub image name
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          echo "IMAGE_NAME=docker.io/${DOCKER_USERNAME,,}/mep-apis" \
+            >> "$GITHUB_ENV"
+
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build Docker Image
-        run: |
-          docker build \
-            -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Push Docker Image
-        run: |
-          docker push \
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-            IMAGE="${{ secrets.DOCKER_USERNAME }}/rmept:latest"
-            CONTAINER="rmept"
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.EC2_HOST }}
+          SSH_PORT: ${{ secrets.EC2_SSH_PORT }}
+          SSH_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            echo "Pulling latest image..."
-            docker pull "$IMAGE"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
 
-            echo "Removing old container..."
-            docker rm -f "$CONTAINER" 2>/dev/null || true
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
-            echo "Starting .NET 8 API..."
-            docker run -d \
-              --name "$CONTAINER" \
-              --restart unless-stopped \
-              -p 5000:8080 \
-              "$IMAGE"
+          # Use a previously verified SSH host key.
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
-            echo "Checking container status..."
-            docker ps --filter "name=$CONTAINER"
+      - name: Deploy to EC2 with rollback
+        env:
+          SSH_HOST: ${{ secrets.EC2_HOST }}
+          SSH_USER: ${{ secrets.EC2_USER }}
+          SSH_PORT: ${{ secrets.EC2_SSH_PORT }}
+          IMAGE: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
+          HOST_PORT: ${{ env.HOST_PORT }}
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          HEALTH_PATH: ${{ env.HEALTH_PATH }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            echo "Deployment completed success
+          ssh -i ~/.ssh/deploy_key \
+            -p "${SSH_PORT:-22}" \
+            -o BatchMode=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "IMAGE='$IMAGE' IMAGE_TAG='$IMAGE_TAG' \
+            CONTAINER_NAME='$CONTAINER_NAME' \
+            CONTAINER_PORT='$CONTAINER_PORT' \
+            HOST_PORT='$HOST_PORT' \
+            DEPLOY_PATH='$DEPLOY_PATH' \
+            HEALTH_PATH='$HEALTH_PATH' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+
+          cd "$DEPLOY_PATH"
+
+          NEW_IMAGE="${IMAGE}:${IMAGE_TAG}"
+          PREVIOUS_NAME="${CONTAINER_NAME}-previous"
+          HAD_PREVIOUS=false
+
+          # EC2 must already be logged into Docker Hub.
+          docker pull "$NEW_IMAGE"
+
+          if docker container inspect "$PREVIOUS_NAME" >/dev/null 2>&1; then
+            docker rm -f "$PREVIOUS_NAME"
+          fi
+
+          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            docker stop "$CONTAINER_NAME"
+            docker rename "$CONTAINER_NAME" "$PREVIOUS_NAME"
+            HAD_PREVIOUS=true
+          fi
+
+          rollback() {
+            echo "Deployment failed. Rolling back..."
+
+            docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+            if [ "$HAD_PREVIOUS" = true ]; then
+              docker rename "$PREVIOUS_NAME" "$CONTAINER_NAME"
+              docker start "$CONTAINER_NAME"
+            fi
+          }
+
+          trap 'rollback' ERR
+
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            --env-file "$DEPLOY_PATH/.env" \
+            -p "${HOST_PORT}:${CONTAINER_PORT}" \
+            "$NEW_IMAGE"
+
+          HEALTH_URL="http://127.0.0.1:${HOST_PORT}${HEALTH_PATH}"
+          HEALTHY=false
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent \
+                --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
+              HEALTHY=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$HEALTHY" != true ]; then
+            docker logs --tail 100 "$CONTAINER_NAME" || true
+            echo "Health check failed: $HEALTH_URL"
+            false
+          fi
+
+          trap - ERR
+
+          if [ "$HAD_PREVIOUS" = true ]; then
+            docker rm -f "$PREVIOUS_NAME"
+          fi
+
+          echo "Deployment successful: $NEW_IMAGE"
+          REMOTE
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
