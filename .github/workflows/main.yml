@@ -1,29 +1,18 @@
-
-name: DRMep .NET 8 API CI/CD
+name: MEP-APIs-DotNet8-CI-CD
 
 on:
   push:
     branches:
       - main
-    paths:
-      - 'mep-apis/**'
-      - '.github/workflows/deploy.yml'
 
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: mep-apis-deployment
-  cancel-in-progress: false
-
 env:
   IMAGE_NAME: mep-apis
-  CONTAINER_NAME: mep-apis
+  DOTNET_VERSION: '8.0.x'
 
 jobs:
-  build-and-deploy:
+  build-deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,70 +20,71 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      # 2. Configure Docker Buildx
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      # 2. Setup .NET 8
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
-         context: ./MEP-APIs
-         file: ./MEP-APIs/Dockerfile
-         push: true
-         tags: |
-                 ghcr.io/padmakargangurde/mep-apis:latest
-                 ghcr.io/padmakargangurde/mep-apis:${{ github.sha }}
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # 3. Login to Docker Hub
-      - name: Login to Docker Hub
+      # 3. Restore NuGet packages
+      - name: Restore Dependencies
+        run: dotnet restore MEP-APIs.sln
+
+      # 4. Build solution
+      - name: Build Solution
+        run: dotnet build MEP-APIs.sln --configuration Release --no-restore
+
+      # 5. Run tests
+      - name: Run Tests
+        run: dotnet test MEP-APIs.sln --configuration Release --no-build
+
+      # 6. Login to Docker Hub
+      - name: Login Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 4. Build and push the .NET 8 API image
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./mep-apis
-          file: ./mep-apis/Dockerfile
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/mep-apis:latest
-            ${{ secrets.DOCKER_USERNAME }}/mep-apis:${{ github.sha }}
+      # 7. Build Docker image
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
+            .
 
-      # 5. Deploy to the existing AWS EC2 server
-      - name: Deploy to AWS EC2
+      # 8. Push image to Docker Hub
+      - name: Push Docker Image
+        run: |
+          docker push \
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      # 9. Deploy to AWS EC2
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.0
-        env:
-          IMAGE: ${{ secrets.DOCKER_USERNAME }}/mep-apis:${{ github.sha }}
-          CONTAINER: ${{ env.CONTAINER_NAME }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: IMAGE,CONTAINER
           script: |
-            set -eu
+            set -e
 
-            echo "Pulling Docker image..."
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/mep-apis:latest"
+            CONTAINER="mep-apis"
+
+            echo "Pulling latest Docker image..."
             docker pull "$IMAGE"
 
-            echo "Removing previous container..."
+            echo "Removing old container..."
             docker rm -f "$CONTAINER" 2>/dev/null || true
 
-            echo "Starting DRMep API..."
+            echo "Starting new container..."
             docker run -d \
               --name "$CONTAINER" \
               --restart unless-stopped \
-              -p 5001:8080 \
+              -p 4444:8080 \
               "$IMAGE"
 
             echo "Checking container status..."
-            sleep 5
             docker ps --filter "name=$CONTAINER"
 
-            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
-              echo "Container failed to start. Recent logs:"
-              docker logs --tail 100 "$CONTAINER" || true
-              exit 1
-            fi
-
-            echo "Deployment completed successfulaly."
+            echo "Deployment completed."
