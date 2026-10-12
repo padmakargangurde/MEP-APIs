@@ -38,9 +38,9 @@ jobs:
          context: ./MEP-APIs
          file: ./MEP-APIs/Dockerfile
          push: true
-     tags: |
-      ghcr.io/padmakargangurde/mep-apis:latest
-      ghcr.io/padmakargangurde/mep-apis:${{ github.sha }}
+         tags: |
+                 ghcr.io/padmakargangurde/mep-apis:latest
+                 ghcr.io/padmakargangurde/mep-apis:${{ github.sha }}
 
       # 3. Login to Docker Hub
       - name: Login to Docker Hub
