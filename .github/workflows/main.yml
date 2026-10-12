@@ -32,7 +32,7 @@ jobs:
 
       # 4. Build solution
       - name: Build Solution
-        run: dotnet build MEP-APIs.sln --configuration Release --no-restore
+        run: dotnet build ./MEP-APIs/MEP-APIs.sln --configuration Release --no-restore
 
       # 5. Run tests
       - name: Run Tests
