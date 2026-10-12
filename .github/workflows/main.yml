@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - 'MEP-APIs/**'
+      - 'mep-apis/**'
       - '.github/workflows/deploy.yml'
 
   workflow_dispatch:
@@ -15,12 +15,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: drmep-api-deployment
+  group: mep-apis-deployment
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: drmep
-  CONTAINER_NAME: drmep-api
+  IMAGE_NAME: mep-apis
+  CONTAINER_NAME: mep-apis
 
 jobs:
   build-and-deploy:
@@ -46,18 +46,18 @@ jobs:
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
         with:
-          context: ./MEP-APIs
-          file: ./MEP-APIs/Dockerfile
+          context: ./mep-apis
+          file: ./mep-apis/Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/drmep:latest
-            ${{ secrets.DOCKER_USERNAME }}/drmep:${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/mep-apis:latest
+            ${{ secrets.DOCKER_USERNAME }}/mep-apis:${{ github.sha }}
 
       # 5. Deploy to the existing AWS EC2 server
       - name: Deploy to AWS EC2
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE: ${{ secrets.DOCKER_USERNAME }}/drmep:${{ github.sha }}
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/mep-apis:${{ github.sha }}
           CONTAINER: ${{ env.CONTAINER_NAME }}
         with:
           host: ${{ secrets.EC2_HOST }}
