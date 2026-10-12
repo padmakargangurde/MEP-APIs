@@ -40,7 +40,14 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Find Dockerfile
+        run: |
+          echo "Repository root:"
+          pwd
+           ls -la
 
+          echo "Searching for Dockerfile:"
+           find . -type f -iname "Dockerfile"
       # 7. Build Docker image
       - name: Build Docker Image
         run: |
