@@ -48,12 +48,21 @@ jobs:
 
           echo "Searching for Dockerfile:"
            find . -type f -iname "Dockerfile"
+
+      - name: Inspect Project Structure
+        run: |
+         echo "Repository root:"
+         pwd
+         find . -maxdepth 4 -type f \
+          \( -name "*.sln" -o -name "*.csproj" -o -iname "Dockerfile" \)
+          
       # 7. Build Docker image
       - name: Build Docker Image
         run: |
-          docker build \
-            -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
-            .
+         docker build \
+         -f MEP-APIs/Dockerfile \
+         -t ${{ secrets.DOCKER_USERNAME }}/mep-apis:latest \
+          MEP-APIs
 
       # 8. Push image to Docker Hub
       - name: Push Docker Image
