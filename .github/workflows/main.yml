@@ -26,7 +26,7 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # 3. Restore NuGet packages
+      # 3. Restore dependencies
       - name: Restore Dependencies
         run: dotnet restore ./MEP-APIs/MEP-APIs.sln
 
@@ -34,35 +34,24 @@ jobs:
       - name: Build Solution
         run: dotnet build ./MEP-APIs/MEP-APIs.sln --configuration Release --no-restore
 
+      # 5. Run tests
+      - name: Run Tests
+        run: dotnet test ./MEP-APIs/MEP-APIs.sln --configuration Release --no-build
+
       # 6. Login to Docker Hub
       - name: Login Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Find Dockerfile
-        run: |
-          echo "Repository root:"
-          pwd
-           ls -la
 
-          echo "Searching for Dockerfile:"
-           find . -type f -iname "Dockerfile"
-
-      - name: Inspect Project Structure
-        run: |
-         echo "Repository root:"
-         pwd
-         find . -maxdepth 4 -type f \
-          \( -name "*.sln" -o -name "*.csproj" -o -iname "Dockerfile" \)
-          
       # 7. Build Docker image
       - name: Build Docker Image
         run: |
-         docker build \
-         -f MEP-APIs/Dockerfile \
-         -t ${{ secrets.DOCKER_USERNAME }}/mep-apis:latest \
-          MEP-APIs
+          docker build \
+            -f MEP-APIs/Dockerfile \
+            -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
+            MEP-APIs
 
       # 8. Push image to Docker Hub
       - name: Push Docker Image
@@ -80,7 +69,7 @@ jobs:
           script: |
             set -e
 
-            IMAGE="${{ secrets.DOCKER_USERNAME }}/mep-apis:latest"
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
             CONTAINER="mep-apis"
 
             echo "Pulling latest Docker image..."
